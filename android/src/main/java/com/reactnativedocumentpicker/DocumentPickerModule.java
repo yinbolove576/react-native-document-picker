@@ -11,6 +11,7 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.provider.DocumentsContract;
 import android.provider.OpenableColumns;
+import android.text.TextUtils;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
@@ -39,6 +40,9 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 
+import io.microshow.rxffmpeg.RxFFmpegCommandList;
+import io.microshow.rxffmpeg.RxFFmpegInvoke;
+
 @ReactModule(name = DocumentPickerModule.NAME)
 public class DocumentPickerModule extends ReactContextBaseJavaModule {
   public static final String NAME = "RNDocumentPicker";
@@ -56,6 +60,7 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
   private static final String OPTION_TYPE = "type";
   private static final String OPTION_MULTIPLE = "allowMultiSelection";
   private static final String OPTION_COPY_TO = "copyTo";
+  private static final String OPTION_SCREENSHOT_WIDTH = "screenshotWidth";
 
   private static final String FIELD_URI = "uri";
   private static final String FIELD_FILE_COPY_URI = "fileCopyUri";
@@ -63,6 +68,7 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
   private static final String FIELD_NAME = "name";
   private static final String FIELD_TYPE = "type";
   private static final String FIELD_SIZE = "size";
+  private static final String FIELD_THUMB = "thumb";
 
   private final ActivityEventListener activityEventListener = new BaseActivityEventListener() {
     @Override
@@ -91,6 +97,7 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
 
   private Promise promise;
   private String copyTo;
+  private int screenshotWidth;
 
   public DocumentPickerModule(ReactApplicationContext reactContext) {
     super(reactContext);
@@ -114,6 +121,7 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
     Activity currentActivity = getCurrentActivity();
     this.promise = promise;
     this.copyTo = args.hasKey(OPTION_COPY_TO) ? args.getString(OPTION_COPY_TO) : null;
+    this.screenshotWidth = args.hasKey(OPTION_SCREENSHOT_WIDTH) ? args.getInt(OPTION_SCREENSHOT_WIDTH) : 320;
 
     if (currentActivity == null) {
       sendError(E_ACTIVITY_DOES_NOT_EXIST, "Current activity does not exist");
@@ -158,6 +166,7 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
       return;
     }
     this.promise = promise;
+    this.screenshotWidth = 320;
     try {
       Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
       currentActivity.startActivityForResult(intent, PICK_DIR_REQUEST_CODE, null);
@@ -214,7 +223,7 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
           return;
         }
 
-        new ProcessDataTask(getReactApplicationContext(), uris, copyTo, promise).execute();
+        new ProcessDataTask(getReactApplicationContext(), uris, copyTo, promise, screenshotWidth).execute();
       } catch (Exception e) {
         sendError(E_UNEXPECTED_EXCEPTION, e.getLocalizedMessage(), e);
       }
@@ -228,13 +237,15 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
     private final List<Uri> uris;
     private final String copyTo;
     private final Promise promise;
+    private final int screenshotWidth;
 
-    protected ProcessDataTask(ReactContext reactContext, List<Uri> uris, String copyTo, Promise promise) {
+    protected ProcessDataTask(ReactContext reactContext, List<Uri> uris, String copyTo, Promise promise, int screenshotWidth) {
       super(reactContext.getExceptionHandler());
       this.weakContext = new WeakReference<>(reactContext.getApplicationContext());
       this.uris = uris;
       this.copyTo = copyTo;
       this.promise = promise;
+      this.screenshotWidth = screenshotWidth;
     }
 
     @Override
@@ -251,6 +262,39 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
       promise.resolve(readableArray);
     }
 
+    public static String[] getBoxblur(String input, int screenshotWidth, String output) {
+      RxFFmpegCommandList cmdlist = new RxFFmpegCommandList();
+      cmdlist.append("-i");
+      cmdlist.append(input);
+      cmdlist.append("-vf");
+      cmdlist.append("scale=" + screenshotWidth + ":-1");
+      cmdlist.append("-preset");
+      cmdlist.append("superfast");
+      cmdlist.append(output);
+      return cmdlist.build();
+    }
+
+    private static String getThumbPath(Context context, Uri uri, String type, int screenshotWidth) {
+      String thumbPath = "";
+      if (!TextUtils.isEmpty(type) && (type.contains("image") || type.contains("video"))) {
+        String inputPath = FileUtils.getFilePathFromURI(context, uri);
+        String thumbName;
+        if (!TextUtils.isEmpty(inputPath)) {
+          String fileName = inputPath.substring(inputPath.lastIndexOf("/") + 1);
+          if (fileName.lastIndexOf(".") > -1) {
+            thumbName = FIELD_THUMB + fileName.substring(0, fileName.lastIndexOf(".")) + ".jpg";
+          } else {
+            thumbName = FIELD_THUMB + fileName + ".jpg";
+          }
+        } else {
+          thumbName = UUID.randomUUID() + ".jpg";
+        }
+        thumbPath = FileUtils.getCachePath(context) + thumbName;
+        RxFFmpegInvoke.getInstance().runCommand(getBoxblur(inputPath, screenshotWidth, thumbPath), null);
+      }
+      return thumbPath;
+    }
+
     private WritableMap getMetadata(Uri uri) {
       Context context = weakContext.get();
       if (context == null) {
@@ -259,7 +303,9 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
       ContentResolver contentResolver = context.getContentResolver();
       WritableMap map = Arguments.createMap();
       map.putString(FIELD_URI, uri.toString());
-      map.putString(FIELD_TYPE, contentResolver.getType(uri));
+      String mime = contentResolver.getType(uri);
+      map.putString(FIELD_TYPE, mime);
+      String newMime = "";
       try (Cursor cursor = contentResolver.query(uri, null, null, null, null, null)) {
         if (cursor != null && cursor.moveToFirst()) {
           int displayNameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
@@ -269,7 +315,8 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
           }
           int mimeIndex = cursor.getColumnIndex(DocumentsContract.Document.COLUMN_MIME_TYPE);
           if (!cursor.isNull(mimeIndex)) {
-            map.putString(FIELD_TYPE, cursor.getString(mimeIndex));
+            newMime = cursor.getString(mimeIndex);
+            map.putString(FIELD_TYPE, newMime);
           }
           int sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE);
           if (!cursor.isNull(sizeIndex)) {
@@ -278,6 +325,8 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
         }
       }
 
+      String thumbPath = getThumbPath(context, uri, !TextUtils.isEmpty(newMime) ? newMime : mime, this.screenshotWidth);
+      map.putString(FIELD_THUMB, thumbPath);
       prepareFileUri(context, map, uri);
       return map;
     }
@@ -338,7 +387,8 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
           if (out != null) {
             out.close();
           }
-        } catch (IOException ignored) {}
+        } catch (IOException ignored) {
+        }
         throw e;
       }
     }
