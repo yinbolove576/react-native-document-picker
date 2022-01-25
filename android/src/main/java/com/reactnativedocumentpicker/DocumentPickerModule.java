@@ -38,7 +38,6 @@ import java.io.InputStream;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
-import java.util.UUID;
 
 import io.microshow.rxffmpeg.RxFFmpegCommandList;
 import io.microshow.rxffmpeg.RxFFmpegInvoke;
@@ -69,6 +68,8 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
   private static final String FIELD_TYPE = "type";
   private static final String FIELD_SIZE = "size";
   private static final String FIELD_THUMB = "thumb";
+
+  private static final String FIELD_CLOUD_THUMB = "cloud_thumb";
 
   private final ActivityEventListener activityEventListener = new BaseActivityEventListener() {
     @Override
@@ -274,27 +275,6 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
       return cmdlist.build();
     }
 
-    private static String getThumbPath(Context context, Uri uri, String type, int screenshotWidth) {
-      String thumbPath = "";
-      if (!TextUtils.isEmpty(type) && (type.contains("image") || type.contains("video"))) {
-        String inputPath = FileUtils.getFilePathFromURI(context, uri);
-        String thumbName;
-        if (!TextUtils.isEmpty(inputPath)) {
-          String fileName = inputPath.substring(inputPath.lastIndexOf("/") + 1);
-          if (fileName.lastIndexOf(".") > -1) {
-            thumbName = FIELD_THUMB + fileName.substring(0, fileName.lastIndexOf(".")) + ".jpg";
-          } else {
-            thumbName = FIELD_THUMB + fileName + ".jpg";
-          }
-        } else {
-          thumbName = UUID.randomUUID() + ".jpg";
-        }
-        thumbPath = FileUtils.getCachePath(context) + thumbName;
-        RxFFmpegInvoke.getInstance().runCommand(getBoxblur(inputPath, screenshotWidth, thumbPath), null);
-      }
-      return thumbPath;
-    }
-
     private WritableMap getMetadata(Uri uri) {
       Context context = weakContext.get();
       if (context == null) {
@@ -325,32 +305,46 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
         }
       }
 
-      String thumbPath = getThumbPath(context, uri, !TextUtils.isEmpty(newMime) ? newMime : mime, this.screenshotWidth);
-      map.putString(FIELD_THUMB, thumbPath);
-      prepareFileUri(context, map, uri);
+      String type = !TextUtils.isEmpty(newMime) ? newMime : mime;
+      if (!TextUtils.isEmpty(type) && (type.contains("image") || type.contains("video"))) {
+        prepareFileUri(context, map, uri);
+      } else {
+        map.putNull(FIELD_FILE_COPY_URI);
+      }
       return map;
     }
 
     private void prepareFileUri(Context context, WritableMap map, Uri uri) {
       if (copyTo != null) {
-        File dir = context.getCacheDir();
+        File destFile = context.getCacheDir();
         if (copyTo.equals("documentDirectory")) {
-          dir = context.getFilesDir();
+          destFile = context.getFilesDir();
         }
         // we don't want to rename the file so we put it into a unique location
-        dir = new File(dir, UUID.randomUUID().toString());
+
         try {
-          boolean didCreateDir = dir.mkdir();
-          if (!didCreateDir) {
-            throw new IOException("failed to create directory at " + dir.getAbsolutePath());
-          }
           String fileName = map.getString(FIELD_NAME);
           if (fileName == null) {
             fileName = String.valueOf(System.currentTimeMillis());
           }
-          File destFile = new File(dir, fileName);
+          destFile = new File(destFile + File.separator + FIELD_CLOUD_THUMB + File.separator + fileName);
+          File dir = destFile.getParentFile();
+          if (dir != null && !dir.exists()) {
+            dir.mkdirs();
+          }
           String copyPath = copyFile(context, uri, destFile);
           map.putString(FIELD_FILE_COPY_URI, copyPath);
+
+          //get thumbnail
+          String thumbName;
+          if (fileName.lastIndexOf(".") > -1) {
+            thumbName = FIELD_THUMB + fileName.substring(0, fileName.lastIndexOf(".")) + ".jpg";
+          } else {
+            thumbName = FIELD_THUMB + fileName + ".jpg";
+          }
+          String thumbPath = dir + File.separator + thumbName;
+          RxFFmpegInvoke.getInstance().runCommand(getBoxblur(copyPath, screenshotWidth, thumbPath), null);
+          map.putString(FIELD_THUMB, thumbPath);
         } catch (Exception e) {
           e.printStackTrace();
           map.putNull(FIELD_FILE_COPY_URI);
