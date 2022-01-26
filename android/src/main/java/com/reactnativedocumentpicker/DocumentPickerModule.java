@@ -67,7 +67,7 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
   private static final String FIELD_NAME = "name";
   private static final String FIELD_TYPE = "type";
   private static final String FIELD_SIZE = "size";
-  private static final String FIELD_THUMB = "thumb-";
+  private static final String FIELD_THUMB = "thumb";
 
   private static final String FIELD_CLOUD_THUMB = "cloud_thumb";
 
@@ -338,11 +338,11 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
           //get thumbnail
           String thumbName;
           if (fileName.lastIndexOf(".") > -1) {
-            thumbName = FIELD_THUMB + fileName.substring(0, fileName.lastIndexOf(".")) + ".jpg";
+            thumbName = fileName.substring(0, fileName.lastIndexOf(".")) + ".jpg";
           } else {
-            thumbName = FIELD_THUMB + fileName + ".jpg";
+            thumbName = fileName + ".jpg";
           }
-          String thumbPath = dir + File.separator + thumbName;
+          String thumbPath = dir + File.separator + FIELD_THUMB + "-" + thumbName;
           RxFFmpegInvoke.getInstance().runCommand(getBoxblur(copyPath, screenshotWidth, thumbPath), null);
           map.putString(FIELD_THUMB, thumbPath);
         } catch (Exception e) {
