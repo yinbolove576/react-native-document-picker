@@ -67,7 +67,7 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
   private static final String FIELD_NAME = "name";
   private static final String FIELD_TYPE = "type";
   private static final String FIELD_SIZE = "size";
-  private static final String FIELD_THUMB = "thumb";
+  private static final String FIELD_THUMB = "thumb-";
 
   private static final String FIELD_CLOUD_THUMB = "cloud_thumb";
 
