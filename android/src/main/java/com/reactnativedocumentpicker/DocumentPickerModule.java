@@ -7,6 +7,8 @@ import android.content.ContentResolver;
 import android.content.Context;
 import android.content.Intent;
 import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.net.Uri;
 import android.os.Bundle;
 import android.provider.DocumentsContract;
@@ -15,6 +17,7 @@ import android.text.TextUtils;
 import android.util.Log;
 
 import androidx.annotation.NonNull;
+import androidx.exifinterface.media.ExifInterface;
 
 import com.facebook.react.bridge.ActivityEventListener;
 import com.facebook.react.bridge.Arguments;
@@ -32,15 +35,16 @@ import com.facebook.react.bridge.WritableMap;
 import com.facebook.react.module.annotations.ReactModule;
 
 import java.io.File;
+import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 
-import io.microshow.rxffmpeg.RxFFmpegCommandList;
-import io.microshow.rxffmpeg.RxFFmpegInvoke;
 
 @ReactModule(name = DocumentPickerModule.NAME)
 public class DocumentPickerModule extends ReactContextBaseJavaModule {
@@ -263,18 +267,6 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
       promise.resolve(readableArray);
     }
 
-    public static String[] getBoxblur(String input, int screenshotWidth, String output) {
-      RxFFmpegCommandList cmdlist = new RxFFmpegCommandList();
-      cmdlist.append("-i");
-      cmdlist.append(input);
-      cmdlist.append("-vf");
-      cmdlist.append("scale=" + screenshotWidth + ":-1");
-      cmdlist.append("-preset");
-      cmdlist.append("superfast");
-      cmdlist.append(output);
-      return cmdlist.build();
-    }
-
     private WritableMap getMetadata(Uri uri) {
       Context context = weakContext.get();
       if (context == null) {
@@ -314,6 +306,106 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
       return map;
     }
 
+    public static int[] getImageDimensions(Uri uri, Context reactContext) {
+      InputStream inputStream;
+      try {
+        inputStream = reactContext.getContentResolver().openInputStream(uri);
+      } catch (FileNotFoundException e) {
+        e.printStackTrace();
+        return new int[]{0, 0};
+      }
+
+      BitmapFactory.Options options = new BitmapFactory.Options();
+      options.inJustDecodeBounds = true;
+      BitmapFactory.decodeStream(inputStream, null, options);
+      return new int[]{options.outWidth, options.outHeight};
+    }
+
+    public static File createFile(Context reactContext, String fileType) {
+      try {
+        String filename = File.separator + FIELD_THUMB + File.separator + UUID.randomUUID() + "." + fileType;
+        // getCacheDir will auto-clean according to android docs
+        File fileDir = reactContext.getCacheDir();
+
+        File file = new File(fileDir, filename);
+        File dir = file.getParentFile();
+        if (dir != null && !dir.exists()) {
+          dir.mkdirs();
+        }
+        file.createNewFile();
+        return file;
+
+      } catch (Exception e) {
+        e.printStackTrace();
+        return null;
+      }
+    }
+
+    static String getOrientation(Uri uri, Context context) throws IOException {
+      ExifInterface exifInterface = new ExifInterface(context.getContentResolver().openInputStream(uri));
+      return exifInterface.getAttribute(ExifInterface.TAG_ORIENTATION);
+    }
+
+    // ExifInterface.saveAttributes is costly operation so don't set exif for unnecessary orientations
+    static void setOrientation(File file, String orientation, Context context) throws IOException {
+      if (orientation.equals(String.valueOf(ExifInterface.ORIENTATION_NORMAL)) || orientation.equals(String.valueOf(ExifInterface.ORIENTATION_UNDEFINED))) {
+        return;
+      }
+      ExifInterface exifInterface = new ExifInterface(file);
+      exifInterface.setAttribute(ExifInterface.TAG_ORIENTATION, orientation);
+      exifInterface.saveAttributes();
+    }
+
+    /**
+     * 计算出所需要压缩的大小
+     *
+     * @param options
+     * @param reqWidth  我们期望的图片的宽，单位px
+     * @param reqHeight 我们期望的图片的高，单位px
+     * @return
+     */
+    private static int calculateSampleSize(BitmapFactory.Options options, int reqWidth, int reqHeight) {
+      int sampleSize = 1;
+      int picWidth = options.outWidth;
+      int picHeight = options.outHeight;
+      if (picWidth > reqWidth || picHeight > reqHeight) {
+        int halfPicWidth = picWidth / 2;
+        int halfPicHeight = picHeight / 2;
+        while (halfPicWidth / sampleSize > reqWidth || halfPicHeight / sampleSize > reqHeight) {
+          sampleSize *= 2;
+        }
+      }
+      return sampleSize;
+    }
+
+    // Resize image
+    // When decoding a jpg to bitmap all exif meta data will be lost, so make sure to copy orientation exif to new file else image might have wrong orientations
+    public Uri resizeImage(Uri uri, Context context) {
+      try {
+        int[] origDimens = getImageDimensions(uri, context);
+
+        if (origDimens[0] < 320 && origDimens[1] < 320) {
+          return uri;
+        }
+        BitmapFactory.Options bitmapOptions = new BitmapFactory.Options();
+        bitmapOptions.inJustDecodeBounds = true;
+        BitmapFactory.decodeFile(uri.getPath(), bitmapOptions);
+        bitmapOptions.inJustDecodeBounds = false;
+        bitmapOptions.inSampleSize = calculateSampleSize(bitmapOptions, 100, 100);
+        Bitmap bitmap = BitmapFactory.decodeFile(uri.getPath(), bitmapOptions); // 解码文件
+        String originalOrientation = getOrientation(uri, context);
+
+        File file = createFile(context, "jpg");
+        OutputStream os = context.getContentResolver().openOutputStream(Uri.fromFile(file));
+        bitmap.compress(Bitmap.CompressFormat.WEBP, 60, os);
+        setOrientation(file, originalOrientation, context);
+        return Uri.fromFile(file);
+      } catch (Exception e) {
+        e.printStackTrace();
+        return uri; // cannot resize the image, return the original uri
+      }
+    }
+
     private void prepareFileUri(Context context, WritableMap map, Uri uri) {
       if (copyTo != null) {
         File destFile = context.getCacheDir();
@@ -335,16 +427,8 @@ public class DocumentPickerModule extends ReactContextBaseJavaModule {
           String copyPath = copyFile(context, uri, destFile);
           map.putString(FIELD_FILE_COPY_URI, copyPath);
 
-          //get thumbnail
-          String thumbName;
-          if (fileName.lastIndexOf(".") > -1) {
-            thumbName = fileName.substring(0, fileName.lastIndexOf(".")) + ".jpg";
-          } else {
-            thumbName = fileName + ".jpg";
-          }
-          String thumbPath = dir + File.separator + FIELD_THUMB + "-" + thumbName;
-          RxFFmpegInvoke.getInstance().runCommand(getBoxblur(copyPath, screenshotWidth, thumbPath), null);
-          map.putString(FIELD_THUMB, thumbPath);
+          Uri thumbUri = resizeImage(Uri.fromFile(destFile), context);
+          map.putString(FIELD_THUMB, thumbUri.getPath());
         } catch (Exception e) {
           e.printStackTrace();
           map.putNull(FIELD_FILE_COPY_URI);
